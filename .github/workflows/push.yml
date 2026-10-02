@@ -1,0 +1,73 @@
+name: Desplegar servidor de avisos
+
+on:
+  push:
+    branches: [main]
+    paths: ['push/**', '.github/workflows/push.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: push-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Comprobar credenciales
+        id: creds
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Faltan los secretos CLOUDFLARE_API_TOKEN y CLOUDFLARE_ACCOUNT_ID. No se despliega nada."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Preparar KV y subdominio
+        if: steps.creds.outputs.ok == 'true'
+        id: prep
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+          TITLE="forus-tempo-push"
+          KV_ID=$(curl -fsS -H "$AUTH" "$API/storage/kv/namespaces?per_page=100" | jq -r --arg t "$TITLE" '.result[] | select(.title==$t) | .id' | head -n1)
+          if [ -z "$KV_ID" ]; then
+            KV_ID=$(curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" -d "{\"title\":\"$TITLE\"}" "$API/storage/kv/namespaces" | jq -r '.result.id')
+          fi
+          echo "KV: $KV_ID"
+          sed -i "s/__KV_ID__/$KV_ID/" push/wrangler.toml
+
+          SUB=$(curl -sS -H "$AUTH" "$API/workers/subdomain" | jq -r '.result.subdomain // empty')
+          if [ -z "$SUB" ]; then
+            for CAND in hugocamara7 "forus-tempo-$(openssl rand -hex 3)"; do
+              SUB=$(curl -sS -X PUT -H "$AUTH" -H "Content-Type: application/json" -d "{\"subdomain\":\"$CAND\"}" "$API/workers/subdomain" | jq -r '.result.subdomain // empty')
+              [ -n "$SUB" ] && break
+            done
+          fi
+          [ -n "$SUB" ] || { echo "::error::No pude crear el subdominio workers.dev"; exit 1; }
+          echo "sub=$SUB" >> "$GITHUB_OUTPUT"
+
+      - name: Desplegar
+        if: steps.creds.outputs.ok == 'true'
+        working-directory: push
+        run: npx --yes wrangler@4 deploy
+
+      - name: Comprobar
+        if: steps.creds.outputs.ok == 'true'
+        run: |
+          URL="https://forus-tempo-push.${{ steps.prep.outputs.sub }}.workers.dev"
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "$URL/vapid"; then echo; break; fi
+            sleep 10
+          done
+          echo "::notice title=Servidor de avisos::$URL"

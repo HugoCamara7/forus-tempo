@@ -1,0 +1,13 @@
+# Servidor de avisos de Forus Tempo (Cloudflare Workers).
+# Lo despliega .github/workflows/push.yml; el id del KV lo rellena ese flujo.
+name = "forus-tempo-push"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[[kv_namespaces]]
+binding = "SUBS"
+id = "__KV_ID__"

@@ -29,6 +29,23 @@ Si prefieres no usar Actions: en **Settings → Pages** elige **Deploy from a br
 
 En un repositorio privado, GitHub Pages solo está disponible con un plan de pago. Con el plan gratuito, el repositorio debe ser público (tus tareas no se suben: viven en tu navegador).
 
+## Avisos (notificaciones)
+
+La app puede avisarte **la tarde anterior** (18:00) y **la mañana del día** (08:00) en que vence una tarea, aunque esté cerrada. Las horas se cambian en **Ajustes → Avisos**.
+
+- Funciona en iPhone (iOS 16.4 o posterior, **solo con la app instalada** en la pantalla de inicio), Android y en el PC con Chrome, Edge, Firefox o Safari. En el PC, el navegador tiene que estar abierto o funcionando en segundo plano.
+- Se activa en cada dispositivo, y cada uno avisa de las tareas guardadas en él.
+- Los avisos los envía un pequeño servidor gratuito en Cloudflare (carpeta `push/`). Para poder avisarte guarda el título y la fecha de tus tareas pendientes, nada más.
+
+### Puesta en marcha del servidor (una sola vez)
+
+1. Crea una cuenta gratuita en [Cloudflare](https://dash.cloudflare.com/sign-up).
+2. En Cloudflare: **My Profile → API Tokens → Create Token**, plantilla **Edit Cloudflare Workers**, y copia el token.
+3. Copia tu **Account ID** (aparece en la página principal de tu cuenta de Cloudflare).
+4. En GitHub: **Settings → Secrets and variables → Actions → New repository secret** y crea `CLOUDFLARE_API_TOKEN` y `CLOUDFLARE_ACCOUNT_ID`.
+5. En **Actions**, ejecuta **Desplegar servidor de avisos**. Al terminar muestra la dirección del servidor (`https://forus-tempo-push.….workers.dev`).
+6. Pon esa dirección en la constante `PUSH_URL` de `index.html` y sube el cambio. A partir de ahí aparece **Avisos** en Ajustes.
+
 ## Instalarla en el móvil
 
 Primero publícala (arriba) y abre la dirección de GitHub Pages en el móvil.
@@ -51,7 +68,7 @@ Abre `index.html` con doble clic en tu navegador. Funciona igual.
 
 ## Personalizar el código
 
-Todo está en `index.html` (más `manifest.webmanifest` y `sw.js`, que permiten instalarla y usarla sin conexión, los iconos `favicon.png`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png` y `apple-touch-icon.png`, y el logo en `assets/`):
+Todo está en `index.html` (el servidor de avisos está aparte, en `push/`; además están `manifest.webmanifest` y `sw.js`, que permiten instalarla y usarla sin conexión, los iconos `favicon.png`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png` y `apple-touch-icon.png`, y el logo en `assets/`):
 
 - Colores y temas: variables CSS al inicio del `<style>`.
 - Colores sugeridos del selector: constante `PRESETS` en el script.

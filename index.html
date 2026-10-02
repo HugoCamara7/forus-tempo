@@ -365,6 +365,10 @@ body{-webkit-tap-highlight-color:transparent}
   :root:not([data-view="dashboard"]) .top{margin-bottom:10px}
 }
 @media (prefers-reduced-motion:reduce){dialog{animation:none!important}}
+.pushbox{display:flex;flex-direction:column;gap:10px}
+.slot{display:flex;align-items:center;gap:12px;justify-content:space-between;flex-wrap:wrap}
+.slot input[type=time]{width:130px;color:var(--ink)}
+.slot input[type=time]:disabled{opacity:.5}
 
 </style>
 </head>
@@ -541,9 +545,11 @@ function defaults(){
       {id:'a4',name:'Equipo',color:AREA_COLORS[3]},
       {id:'a5',name:'Personal',color:AREA_COLORS[6]}
     ],
-    tasks:[], notes:[], lastExport:0
+    tasks:[], notes:[], lastExport:0,
+    push:defaultPush()
   };
 }
+function defaultPush(){ return {on:false,id:'',secret:'',vapid:'',last:'',eve:{on:true,time:'18:00'},mor:{on:true,time:'08:00'}}; }
 function normTask(t, areas){
   t=t||{};
   let area=String(t.area||'');
@@ -594,6 +600,13 @@ function normalize(raw){
     pinned:!!n.pinned, created:Number(n.created)||Date.now(), updated:Number(n.updated)||Date.now()
   })).filter(n=>n.title.trim()||n.text.trim());
   d.lastExport=Number(raw.lastExport)||0;
+  const pu=raw.push;
+  if(pu&&typeof pu==='object'){
+    const okId=v=>typeof v==='string'&&/^[A-Za-z0-9_-]{16,64}$/.test(v)?v:'';
+    const slot=(x,def)=>({on:!(x&&x.on===false),time:x&&/^([01]\d|2[0-3]):[0-5]\d$/.test(x.time)?x.time:def});
+    d.push={on:!!pu.on,id:okId(pu.id),secret:okId(pu.secret),vapid:typeof pu.vapid==='string'?pu.vapid.slice(0,200):'',last:typeof pu.last==='string'?pu.last:'',eve:slot(pu.eve,'18:00'),mor:slot(pu.mor,'08:00')};
+    if(!d.push.id||!d.push.secret) d.push.on=false;
+  }
   return d;
 }
 function load(){
@@ -611,6 +624,7 @@ function save(){
   saveTimer=setTimeout(()=>{
     try{ localStorage.setItem(KEY,JSON.stringify(state)); setSave('Guardado en este navegador'); }
     catch(e){ setSave('No se pudo guardar aquí. Exporta una copia.'); }
+    schedulePush();
   },150);
 }
 const areaOf = t => state.areas.find(a=>a.id===t.area);
@@ -711,7 +725,7 @@ function armConfirm(btn,label,armed,action){
 }
 
 /* ---------- render general ---------- */
-function render(){ renderHeader(); renderSelects(); renderControls(); renderView(); renderFooter(); }
+function render(){ renderHeader(); renderSelects(); renderControls(); renderView(); renderFooter(); updateBadge(); }
 
 function greeting(){
   const hr=new Date().getHours();
@@ -1169,6 +1183,7 @@ function openSettings(){
   const imp=h('button',{type:'button',class:'btn',text:'Importar copia',onclick:()=>{ dstatus.textContent=''; $('#importFile').click(); }});
   const wipe=h('button',{type:'button',class:'btn danger',text:'Borrar todos mis datos'});
   armConfirm(wipe,'Borrar todos mis datos','¿Seguro? Borrar todo',()=>{
+    if(state.push.on) disablePush();
     try{ localStorage.removeItem(KEY); }catch(e){}
     state=defaults(); ui={filter:'all',area:'',q:'',col:'todo'}; applyLook(); render(); setDlg.close();
   });
@@ -1191,6 +1206,7 @@ function openSettings(){
     areaBox, newArea,
     h('h3',{text:'Campos de las tareas'}),
     h('div',{class:'opts'},fcheck('client','Cliente'),fcheck('hours','Horas estimadas'),fcheck('link','Enlace')),
+    ...pushSection(),
     h('h3',{text:'Tus datos'}),
     h('p',{class:'note',text:'Tus tareas se guardan solo en este navegador. Exporta una copia de vez en cuando para no perderlas y para llevarlas a otro dispositivo.'}),
     h('div',{class:'actions'},exp,imp,h('span',{class:'grow'}),wipe),
@@ -1206,9 +1222,134 @@ function say(msg,err){
   else setSave(msg);
 }
 
+/* ---------- avisos (notificaciones push) ---------- */
+// Dirección del servidor de avisos (Cloudflare Worker, carpeta push/). Vacía = avisos desactivados.
+const PUSH_URL='';
+const isIOS=/iP(hone|ad|od)/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+const standalone=()=>(window.matchMedia&&matchMedia('(display-mode: standalone)').matches)||navigator.standalone===true;
+function pushSupport(){
+  if(!PUSH_URL) return 'off';
+  const api='serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  if(!api) return isIOS&&!standalone()?'install':'unsupported';
+  if(location.protocol!=='https:'&&location.hostname!=='localhost') return 'unsupported';
+  if(Notification.permission==='denied') return 'denied';
+  return 'ok';
+}
+const randId=()=>{ const b=crypto.getRandomValues(new Uint8Array(18)); return btoa(String.fromCharCode(...b)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); };
+function keyBytes(k){ const s=atob(k.replace(/-/g,'+').replace(/_/g,'/')+'==='.slice((k.length+3)%4)); return Uint8Array.from(s,c=>c.charCodeAt(0)); }
+async function pushApi(path,body){
+  const r=await fetch(PUSH_URL+path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok) { const e=new Error(data.error||('http '+r.status)); e.status=r.status; throw e; }
+  return data;
+}
+async function vapidKey(){
+  if(!state.push.vapid){ state.push.vapid=(await pushApi('/vapid')).key; }
+  return state.push.vapid;
+}
+function pushTasks(){
+  const td=today(), from=addDays(td,-60), to=addDays(td,120);
+  return state.tasks.filter(t=>t.status!=='done'&&t.due&&t.due>=from&&t.due<=to)
+    .sort((a,b)=>a.due<b.due?-1:a.due>b.due?1:0).slice(0,300).map(t=>({t:t.title.slice(0,120),d:t.due}));
+}
+let pushTimer=null, pushBusy=false;
+function schedulePush(){
+  if(!state.push.on||pushSupport()!=='ok') return;
+  clearTimeout(pushTimer); pushTimer=setTimeout(()=>syncPush(false).catch(()=>{}),2000);
+}
+async function currentSub(){
+  const reg=await navigator.serviceWorker.ready;
+  let sub=await reg.pushManager.getSubscription();
+  if(!sub && Notification.permission==='granted')
+    sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:keyBytes(await vapidKey())});
+  return sub;
+}
+async function syncPush(force){
+  const P=state.push;
+  if(!P.on||pushBusy) return;
+  pushBusy=true;
+  try{
+    const sub=await currentSub();
+    if(!sub){ P.on=false; save(); return; }
+    const body={id:P.id,secret:P.secret,sub:sub.toJSON(),tz:Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC',prefs:{eve:P.eve,mor:P.mor},tasks:pushTasks()};
+    const sig=JSON.stringify([body.sub.endpoint,body.tz,body.prefs,body.tasks]);
+    if(!force && sig===P.last) return;
+    await pushApi('/sync',body);
+    P.last=sig;
+    try{ localStorage.setItem(KEY,JSON.stringify(state)); }catch(e){}
+  } finally { pushBusy=false; }
+}
+async function enablePush(){
+  // El permiso se pide lo primero, dentro del toque, como exige el iPhone.
+  const perm=Notification.permission==='default'?await Notification.requestPermission():Notification.permission;
+  if(perm!=='granted') throw new Error('denied');
+  const P=state.push;
+  if(!P.id){ P.id=randId(); P.secret=randId(); }
+  P.on=true; P.last='';
+  await syncPush(true);
+  save();
+  await pushApi('/test',{id:P.id,secret:P.secret});
+}
+async function disablePush(){
+  const P=state.push; P.on=false; P.last=''; save();
+  try{ const reg=await navigator.serviceWorker.ready; const sub=await reg.pushManager.getSubscription(); if(sub) await sub.unsubscribe(); }catch(e){}
+  if(P.id) pushApi('/unsubscribe',{id:P.id,secret:P.secret}).catch(()=>{});
+}
+function updateBadge(){
+  if(!navigator.setAppBadge) return;
+  const td=today(), n=state.tasks.filter(t=>t.status!=='done'&&t.due&&t.due<=td).length;
+  (n?navigator.setAppBadge(n):navigator.clearAppBadge()).catch(()=>{});
+}
+function pushSection(){
+  const sup=pushSupport();
+  if(sup==='off') return [];
+  const P=state.push;
+  const head=h('h3',{text:'Avisos'});
+  const status=h('p',{class:'status','aria-live':'polite'});
+  const show=(msg,err)=>{ status.textContent=msg; status.className='status'+(err?' err':''); };
+  const box=h('div',{class:'pushbox'});
+  const privacy=h('p',{class:'note',text:'Cada dispositivo recibe los avisos de las tareas guardadas en él. Para poder avisarte, el servidor de avisos guarda el título y la fecha de tus tareas pendientes, nada más.'});
+  function draw(){
+    const s=pushSupport();
+    box.replaceChildren();
+    if(s==='install'){ box.appendChild(h('p',{class:'note',text:'En iPhone, los avisos solo funcionan con la app instalada. En Safari pulsa Compartir → «Añadir a pantalla de inicio» y abre Forus Tempo desde su icono.'})); return; }
+    if(s==='unsupported'){ box.appendChild(h('p',{class:'note',text:'Este navegador no permite avisos. Prueba con Chrome, Edge, Firefox o Safari actualizados.'})); return; }
+    if(s==='denied'){ box.appendChild(h('p',{class:'note',text:'Los avisos están bloqueados para Forus Tempo. Actívalos en los ajustes del teléfono o del navegador y vuelve aquí.'})); return; }
+    if(!P.on){
+      const on=h('button',{type:'button',class:'btn primary',text:'Activar avisos'});
+      on.addEventListener('click',()=>{
+        on.disabled=true; show('Activando…');
+        enablePush().then(()=>{ show('Avisos activados. Te acabamos de enviar uno de prueba.'); draw(); })
+          .catch(e=>{ P.on=false; save(); show(e.message==='denied'?'No diste permiso para los avisos.':'No se pudo conectar con el servidor de avisos. Inténtalo de nuevo.',true); draw(); });
+      });
+      box.append(h('p',{class:'note',text:'Recibe un aviso la tarde anterior y la mañana del día en que vence una tarea, aunque la app esté cerrada.'}),h('div',{class:'actions'},on));
+      return;
+    }
+    const slot=(key,label)=>{
+      const cb=h('input',{type:'checkbox',checked:P[key].on,'aria-label':label});
+      const tm=h('input',{type:'time',value:P[key].time,'aria-label':'Hora: '+label,disabled:!P[key].on});
+      cb.addEventListener('change',()=>{ P[key].on=cb.checked; tm.disabled=!cb.checked; save(); });
+      tm.addEventListener('change',()=>{ if(/^\d{2}:\d{2}$/.test(tm.value)){ P[key].time=tm.value; save(); } });
+      return h('div',{class:'slot'},h('label',{class:'check'},cb,label),tm);
+    };
+    const test=h('button',{type:'button',class:'btn',text:'Enviar aviso de prueba'});
+    test.addEventListener('click',()=>{
+      show('Enviando…');
+      syncPush(true).then(()=>pushApi('/test',{id:P.id,secret:P.secret})).then(()=>show('Enviado. Debería llegarte en unos segundos.'))
+        .catch(()=>show('No se pudo enviar. Revisa tu conexión.',true));
+    });
+    const off=h('button',{type:'button',class:'btn danger',text:'Desactivar'});
+    off.addEventListener('click',()=>{ disablePush(); show('Avisos desactivados en este dispositivo.'); draw(); });
+    box.append(slot('eve','La tarde anterior'),slot('mor','El mismo día'),h('div',{class:'actions'},test,h('span',{class:'grow'}),off));
+  }
+  draw();
+  return [head,box,status,privacy];
+}
+
 /* ---------- exportar / importar ---------- */
 function exportData(){
-  const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});
+  const out=Object.assign({},state); delete out.push;
+  const blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob); a.download='mi-tablero-'+today()+'.json';
   document.body.appendChild(a); a.click(); a.remove();
@@ -1443,7 +1584,7 @@ applyLook();
 render();
 setSave(state.tasks.length?'Guardado en este navegador':'');
 if('serviceWorker' in navigator && (location.protocol==='https:' || location.hostname==='localhost')){
-  window.addEventListener('load',()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}); });
+  window.addEventListener('load',()=>{ navigator.serviceWorker.register('sw.js').then(()=>{ if(state.push.on) syncPush(false).catch(()=>{}); }).catch(()=>{}); });
 }
 })();
 </script>
